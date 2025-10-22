@@ -92,7 +92,7 @@ Environment variables can be set in `wrangler.toml` or via the Cloudflare dashbo
 | `ALLOWED_ORIGINS` | Comma-separated allowed origins | `https://app.pondpilot.io` |
 | `RATE_LIMIT_REQUESTS` | Requests per minute per IP | `60` |
 | `MAX_FILE_SIZE_MB` | Maximum file size to proxy | `500` |
-| `BLOCKED_DOMAINS` | Domains to block (comma-separated) | - |
+| `ALLOWED_DOMAINS` | Comma-separated allowlist patterns (`*` wildcards supported) | Curated defaults for common public datasets |
 
 ## 📊 Monitoring
 

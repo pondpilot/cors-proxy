@@ -18,7 +18,7 @@ import {
   validateResponse,
   parseAllowedDomains,
   DEFAULT_ALLOWED_DOMAINS,
-} from './security.js';
+} from '../shared/security.js';
 
 // Load environment variables
 dotenv.config();
@@ -35,9 +35,10 @@ const config = {
   rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000'), // 1 minute
   maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || '500'),
   requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '30000'), // 30 seconds
-  allowedProtocols: process.env.NODE_ENV === 'production' ? ['https:'] : ['https:', 'http:'],
-  httpsOnly: process.env.HTTPS_ONLY === 'true' || process.env.NODE_ENV === 'production',
+  httpsOnly: process.env.HTTPS_ONLY === 'false' ? false : true,
+  allowedProtocols: process.env.HTTPS_ONLY === 'false' ? ['https:', 'http:'] : ['https:'],
   allowedDomains: parseAllowedDomains(process.env.ALLOWED_DOMAINS || ''),
+  allowCredentials: process.env.ALLOW_CREDENTIALS === 'true',
 };
 
 console.log('Configuration:', {
@@ -73,7 +74,7 @@ const corsOptions: cors.CorsOptions = {
   methods: ['GET', 'HEAD', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Range'],
   exposedHeaders: ['Content-Length', 'Content-Range', 'Content-Type'],
-  credentials: false,
+  credentials: config.allowCredentials,
   maxAge: 86400,
 };
 
@@ -176,10 +177,13 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
       return res.status(400).json({ error: responseValidation.error });
     }
 
-    // Copy headers
+    const maxBytes = config.maxFileSizeMB * 1024 * 1024;
+    let transferred = 0;
+    let startedStreaming = false;
+
+    // Copy headers (excluding content-length to avoid mismatch on abort)
     const headersToForward = [
       'content-type',
-      'content-length',
       'content-range',
       'accept-ranges',
       'etag',
@@ -206,7 +210,34 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(Buffer.from(value));
+
+        if (!value) {
+          continue;
+        }
+
+        if (transferred + value.byteLength > maxBytes) {
+          await reader.cancel('File too large');
+          console.warn(`Aborting response over size limit from ${targetUrl}`, {
+            limitMB: config.maxFileSizeMB,
+            transferredMB: (transferred / (1024 * 1024)).toFixed(1),
+          });
+
+          if (!startedStreaming) {
+            headersToForward.forEach(header => res.removeHeader(header));
+            res.setHeader('Cache-Control', 'no-store');
+            return res.status(413).json({
+              error: `File too large (${((transferred + value.byteLength) / (1024 * 1024)).toFixed(1)}MB exceeds limit of ${config.maxFileSizeMB}MB)`,
+            });
+          }
+
+          res.setHeader('Connection', 'close');
+          res.destroy(new Error('File too large'));
+          return;
+        }
+
+        transferred += value.byteLength;
+        res.write(value);
+        startedStreaming = true;
       }
       res.end();
     } else {

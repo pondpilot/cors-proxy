@@ -86,8 +86,8 @@ RATE_LIMIT_WINDOW_MS=60000       # Window in ms (60000 = 1 minute)
 # File Size
 MAX_FILE_SIZE_MB=500             # Maximum file size to proxy
 
-# Optional: Block specific domains
-BLOCKED_DOMAINS=spam.com,malicious.site
+# Optional: Extend allowlist (comma-separated, supports * wildcards)
+ALLOWED_DOMAINS=*.example.com,datasets.gov
 ```
 
 ## 🌐 Deployment

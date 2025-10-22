@@ -12,10 +12,10 @@ services:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://app.pondpilot.io}
+      - ALLOWED_DOMAINS=${ALLOWED_DOMAINS:-}
       - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-60}
       - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-60000}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-500}
-      - BLOCKED_DOMAINS=${BLOCKED_DOMAINS:-}
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 30s
