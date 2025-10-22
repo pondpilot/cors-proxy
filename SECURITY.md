@@ -4,6 +4,8 @@
 
 The PondPilot CORS proxy is designed with security and privacy as core principles.
 
+**Version 2.0** introduces comprehensive SSRF protection, domain allowlisting, and enhanced security controls.
+
 ## What This Proxy Does
 
 1. **Forwards HTTP Requests**: Acts as a transparent proxy for GET/HEAD requests
@@ -41,6 +43,80 @@ When self-hosting:
 - ✅ Requests never leave your infrastructure
 - ✅ You control logging and monitoring
 - ✅ Open source - verify the code yourself
+
+## 🛡️ Version 2.0 Security Enhancements
+
+### Server-Side Request Forgery (SSRF) Protection
+
+SSRF attacks attempt to use the proxy to access internal network resources. Version 2.0 implements comprehensive SSRF protection:
+
+**Private IP Blocking**:
+- ✅ Loopback: 127.0.0.0/8 (localhost)
+- ✅ Private networks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+- ✅ Link-local: 169.254.0.0/16 (AWS/GCP metadata!)
+- ✅ IPv6 private ranges
+
+**Blocked Hostnames**:
+- ✅ localhost, 0.0.0.0
+- ✅ metadata.google.internal (GCP metadata)
+- ✅ Other cloud metadata endpoints
+
+**Example Blocked Requests**:
+```bash
+# ❌ Accessing AWS metadata (credential theft)
+/proxy?url=http://169.254.169.254/latest/meta-data/
+
+# ❌ Accessing internal services
+/proxy?url=http://127.0.0.1:3000/admin
+
+# ❌ Scanning internal network
+/proxy?url=http://192.168.1.1/router-config
+```
+
+### Domain Allowlisting
+
+**Default Allowlist** (automatically applied):
+- AWS S3: `*.s3.amazonaws.com`, `*.s3.*.amazonaws.com`
+- CloudFront CDN: `*.cloudfront.net`
+- GitHub: `*.github.io`, `*.githubusercontent.com`
+- Google Cloud Storage: `*.storage.googleapis.com`
+- Azure Blob Storage: `*.blob.core.windows.net`
+- Common CDNs and data repositories
+
+**Custom Allowlist** (optional):
+```bash
+# Self-hosted (.env)
+ALLOWED_DOMAINS=*.s3.amazonaws.com,*.cloudfront.net,data.example.com
+
+# Cloudflare Worker (wrangler.toml)
+ALLOWED_DOMAINS = "*.s3.amazonaws.com,my-cdn.net"
+
+# Leave empty to use secure defaults
+ALLOWED_DOMAINS=
+```
+
+### Redirect Protection
+
+**Attack**: Redirect to internal IP after validation
+
+**Protection**:
+- ✅ Redirect following is disabled (`redirect: 'manual'`)
+- ✅ 3xx responses are rejected
+- ✅ Prevents DNS rebinding attacks
+
+### Request Timeouts
+
+**New in 2.0**:
+- Default: 30 seconds
+- Prevents hanging connections
+- Configurable via `REQUEST_TIMEOUT_MS`
+
+### HTTPS Enforcement
+
+**Production Mode**:
+- HTTPS-only by default
+- Configurable via `HTTPS_ONLY` environment variable
+- Prevents man-in-the-middle attacks
 
 ## Security Features
 
@@ -111,12 +187,15 @@ The proxy does NOT forward:
 
 | Threat | Mitigation |
 |--------|------------|
-| Unauthorized access | Origin validation |
-| DDoS / abuse | Rate limiting |
-| Bandwidth exhaustion | File size limits |
-| Malicious content | Domain blocklist |
-| Credential theft | No auth header forwarding |
-| Data logging | No logging policy |
+| **SSRF attacks** | Private IP blocking, domain allowlist, redirect blocking |
+| **DNS rebinding** | Domain allowlist validation before DNS resolution |
+| **Unauthorized access** | Origin validation |
+| **DDoS / abuse** | Rate limiting |
+| **Bandwidth exhaustion** | File size limits, request timeouts |
+| **Open proxy abuse** | Domain allowlist, origin validation |
+| **Credential theft** | No auth header forwarding |
+| **Data exfiltration** | Read-only operations, domain allowlist |
+| **Data logging** | No logging policy |
 
 ### What We Don't Protect Against
 
@@ -183,11 +262,13 @@ The proxy does NOT forward:
 
 ### For Self-Hosters
 
-1. **HTTPS Only**: Use reverse proxy with SSL/TLS
-2. **Firewall**: Restrict access to known IPs if possible
-3. **Updates**: Keep Node.js and dependencies updated
-4. **Monitoring**: Monitor for unusual traffic patterns
-5. **Backups**: Regular system backups (not of proxy data)
+1. **Production Mode**: Set `NODE_ENV=production`
+2. **HTTPS Only**: Set `HTTPS_ONLY=true` and use reverse proxy with SSL/TLS
+3. **Domain Allowlist**: Configure `ALLOWED_DOMAINS` or use secure defaults
+4. **Firewall**: Block outbound access to private IP ranges at network level
+5. **Updates**: Keep Node.js and dependencies updated
+6. **Monitoring**: Monitor for unusual traffic patterns and blocked requests
+7. **Rate Limiting**: Adjust `RATE_LIMIT_REQUESTS` based on your needs
 
 ## Incident Response
 
@@ -220,6 +301,21 @@ All code is open source and available for inspection:
 - No backdoors
 - What you see is what runs
 
+## Security Deployment Checklist
+
+Before deploying to production, verify:
+
+- [ ] `NODE_ENV=production` is set
+- [ ] `HTTPS_ONLY=true` is configured
+- [ ] `ALLOWED_ORIGINS` is restricted to your domain(s)
+- [ ] `ALLOWED_DOMAINS` is configured (or using secure defaults)
+- [ ] Rate limiting is enabled and configured
+- [ ] HTTPS is enforced at reverse proxy/CDN level
+- [ ] Firewall rules block outbound access to private IP ranges
+- [ ] Monitoring and alerting is configured
+- [ ] Dependencies are up to date
+- [ ] Test SSRF protection with blocked IPs
+
 ## Regular Reviews
 
 This security policy is reviewed and updated:
@@ -227,7 +323,8 @@ This security policy is reviewed and updated:
 - When new features are added
 - At least quarterly
 
-Last updated: January 2024
+**Last updated**: October 22, 2024
+**Version**: 2.0.0
 
 ## Questions?
 

@@ -6,9 +6,17 @@ A transparent CORS proxy service for PondPilot that enables browser-based access
 
 - **Privacy-First**: Transparent proxy with no logging or data retention
 - **Multiple Deployment Options**: Official hosted service or self-hosted
-- **Security**: Rate limiting, origin validation, and URL filtering
+- **Security**: SSRF protection, domain allowlisting, rate limiting, origin validation
 - **Production-Ready**: Built for scale with Cloudflare Workers
 - **Open Source**: Full transparency - verify the code yourself
+
+### 🛡️ Version 2.0 Security Enhancements
+
+- **SSRF Protection**: Blocks access to private IPs, localhost, and cloud metadata endpoints
+- **Domain Allowlisting**: Only approved public data sources can be proxied
+- **Redirect Blocking**: Prevents redirect-based SSRF attacks
+- **HTTPS Enforcement**: Production mode requires HTTPS by default
+- **Request Timeouts**: Prevents hanging connections (30s default)
 
 ## 🏗️ Architecture
 
@@ -80,11 +88,14 @@ Your proxy will be available at `http://localhost:3000`
 - Track users
 
 ### Security Features
-- Origin validation (only PondPilot domains allowed)
-- URL allowlist (public data sources only)
-- Rate limiting to prevent abuse
-- No request/response logging
-- HTTPS-only
+- **SSRF Protection**: Blocks private IPs (10.x, 192.168.x, 127.x, 169.254.x) and cloud metadata
+- **Domain Allowlisting**: Default allowlist for S3, CloudFront, GitHub, GCS, Azure Blob, CDNs
+- **Origin Validation**: Only PondPilot domains allowed
+- **Redirect Blocking**: Prevents redirect-based attacks
+- **Rate Limiting**: Per-IP limits to prevent abuse (60 req/min default)
+- **HTTPS Enforcement**: Production mode is HTTPS-only
+- **Request Timeouts**: 30-second timeout prevents hanging
+- **No Logging**: No request/response data logged
 
 See [SECURITY.md](./SECURITY.md) for full details.
 
@@ -97,10 +108,23 @@ Both deployments support these configuration options:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ALLOWED_ORIGINS` | Comma-separated list of allowed origins | `https://app.pondpilot.io` |
+| `ALLOWED_DOMAINS` | Domain allowlist (empty = use secure defaults) | `` (secure defaults) |
+| `HTTPS_ONLY` | Require HTTPS URLs (auto-enabled in production) | `true` |
 | `RATE_LIMIT_REQUESTS` | Max requests per minute per IP | `60` |
 | `MAX_FILE_SIZE_MB` | Maximum file size to proxy | `500` |
-| `ALLOWED_PROTOCOLS` | Allowed URL protocols | `https` |
-| `BLOCKED_DOMAINS` | Comma-separated domains to block | - |
+| `REQUEST_TIMEOUT_MS` | Request timeout in milliseconds | `30000` |
+
+**Default Allowed Domains** (when `ALLOWED_DOMAINS` is empty):
+- AWS S3, CloudFront, GitHub, Google Cloud Storage, Azure Blob Storage, Common CDNs
+
+**Custom Allowlist Examples**:
+```bash
+# Only specific S3 bucket
+ALLOWED_DOMAINS=my-bucket.s3.amazonaws.com
+
+# Multiple domains with wildcards
+ALLOWED_DOMAINS=*.s3.amazonaws.com,*.cloudfront.net,data.example.com
+```
 
 ## 📊 Use Cases
 

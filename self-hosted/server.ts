@@ -5,7 +5,7 @@
  * without CORS headers. Designed for PondPilot to access public data sources.
  *
  * Privacy: No logging, no data retention, no tracking
- * Security: Origin validation, rate limiting, URL filtering
+ * Security: Origin validation, rate limiting, SSRF protection, domain allowlisting
  */
 
 import express, { Request, Response, NextFunction } from 'express';
@@ -13,6 +13,12 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
+import {
+  validateTargetUrl,
+  validateResponse,
+  parseAllowedDomains,
+  DEFAULT_ALLOWED_DOMAINS,
+} from './security.js';
 
 // Load environment variables
 dotenv.config();
@@ -28,15 +34,19 @@ const config = {
   rateLimitRequests: parseInt(process.env.RATE_LIMIT_REQUESTS || '60'),
   rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000'), // 1 minute
   maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || '500'),
-  allowedProtocols: ['https:', 'http:'],
-  blockedDomains: (process.env.BLOCKED_DOMAINS || '')
-    .split(',')
-    .map(d => d.trim())
-    .filter(d => d.length > 0),
+  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '30000'), // 30 seconds
+  allowedProtocols: process.env.NODE_ENV === 'production' ? ['https:'] : ['https:', 'http:'],
+  httpsOnly: process.env.HTTPS_ONLY === 'true' || process.env.NODE_ENV === 'production',
+  allowedDomains: parseAllowedDomains(process.env.ALLOWED_DOMAINS || ''),
 };
 
 console.log('Configuration:', {
-  ...config,
+  allowedOrigins: config.allowedOrigins,
+  rateLimitRequests: config.rateLimitRequests,
+  maxFileSizeMB: config.maxFileSizeMB,
+  requestTimeoutMs: config.requestTimeoutMs,
+  httpsOnly: config.httpsOnly,
+  allowedDomainsCount: config.allowedDomains.length,
   port: PORT,
 });
 
@@ -105,14 +115,18 @@ app.get('/health', (req: Request, res: Response) => {
 app.get(['/', '/info'], (req: Request, res: Response) => {
   res.json({
     service: 'PondPilot CORS Proxy (Self-Hosted)',
-    version: '1.0.0',
+    version: '2.0.0',
     usage: 'GET /proxy?url=<encoded-url>',
     privacy: 'No logging, no data retention',
-    source: 'https://github.com/yourusername/cors-proxy',
+    security: 'SSRF protection, domain allowlisting, HTTPS enforcement',
+    source: 'https://github.com/pondpilot/cors-proxy',
     config: {
       allowedOrigins: config.allowedOrigins,
       rateLimitRequests: config.rateLimitRequests,
       maxFileSizeMB: config.maxFileSizeMB,
+      httpsOnly: config.httpsOnly,
+      allowedDomainsCount: config.allowedDomains.length,
+      usingDefaultAllowlist: !process.env.ALLOWED_DOMAINS,
     },
   });
 });
@@ -126,43 +140,40 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
       return res.status(400).json({ error: 'Missing url parameter' });
     }
 
-    // Validate URL
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(targetUrl);
-    } catch (e) {
-      return res.status(400).json({ error: 'Invalid URL' });
-    }
-
-    // Check protocol
-    if (!config.allowedProtocols.includes(parsedUrl.protocol)) {
-      return res.status(400).json({
-        error: `Protocol ${parsedUrl.protocol} not allowed`,
-      });
-    }
-
-    // Check blocked domains
-    if (config.blockedDomains.some(domain => parsedUrl.hostname.endsWith(domain))) {
-      return res.status(403).json({ error: 'Domain is blocked' });
-    }
-
-    // Fetch the resource
-    const response = await fetch(targetUrl, {
-      method: req.method,
-      headers: {
-        'User-Agent': 'PondPilot-CORS-Proxy/1.0',
-      },
+    // Validate URL with SSRF protection
+    const validation = validateTargetUrl(targetUrl, {
+      allowedDomains: config.allowedDomains,
+      allowedProtocols: config.allowedProtocols,
+      httpsOnly: config.httpsOnly,
+      maxFileSizeMB: config.maxFileSizeMB,
     });
 
-    // Check file size
-    const contentLength = response.headers.get('Content-Length');
-    if (contentLength) {
-      const sizeMB = parseInt(contentLength) / (1024 * 1024);
-      if (sizeMB > config.maxFileSizeMB) {
-        return res.status(413).json({
-          error: `File too large (${sizeMB.toFixed(1)}MB > ${config.maxFileSizeMB}MB)`,
-        });
-      }
+    if (!validation.valid) {
+      return res.status(403).json({ error: validation.error });
+    }
+
+    // Fetch the resource with timeout and no redirect following
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+
+    let fetchResponse: globalThis.Response;
+    try {
+      fetchResponse = await fetch(targetUrl, {
+        method: req.method,
+        headers: {
+          'User-Agent': 'PondPilot-CORS-Proxy/2.0',
+        },
+        redirect: 'manual', // Critical: Prevent redirects to internal IPs
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // Validate response (check for redirects, file size)
+    const responseValidation = validateResponse(fetchResponse, config.maxFileSizeMB);
+    if (!responseValidation.valid) {
+      return res.status(400).json({ error: responseValidation.error });
     }
 
     // Copy headers
@@ -176,7 +187,7 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
     ];
 
     headersToForward.forEach(header => {
-      const value = response.headers.get(header);
+      const value = fetchResponse.headers.get(header);
       if (value) {
         res.setHeader(header, value);
       }
@@ -187,11 +198,11 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Cache-Control', 'public, max-age=3600');
 
     // Set status
-    res.status(response.status);
+    res.status(fetchResponse.status);
 
     // Stream the response
-    if (response.body) {
-      const reader = response.body.getReader();
+    if (fetchResponse.body) {
+      const reader = fetchResponse.body.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -203,6 +214,13 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
     }
 
   } catch (error) {
+    // Handle timeout errors
+    if (error instanceof Error && error.name === 'AbortError') {
+      return res.status(504).json({
+        error: 'Request timeout - the remote server took too long to respond',
+      });
+    }
+
     console.error('Proxy error:', error);
     res.status(502).json({
       error: `Failed to fetch resource: ${error instanceof Error ? error.message : 'Unknown error'}`,

@@ -22,23 +22,42 @@ namespace_id = "pondpilot_cors_proxy"
 simple = { limit = 60, period = 60 }
 
 # Environment variables
+#
+# Security Configuration:
+# - ALLOWED_ORIGINS: Comma-separated list of origins that can use the proxy
+# - ALLOWED_DOMAINS: Domain allowlist (leave empty for secure defaults)
+#   Default includes: S3, CloudFront, GitHub, GCS, Azure Blob Storage, CDNs
+#   Examples: "*.s3.amazonaws.com,*.cloudfront.net,data.example.com"
+# - HTTPS_ONLY: Set to "false" to allow HTTP (not recommended)
+# - REQUEST_TIMEOUT_MS: Request timeout in milliseconds
+# - MAX_FILE_SIZE_MB: Maximum file size to proxy
+#
 [env.production]
 vars = {
   ALLOWED_ORIGINS = "https://app.pondpilot.io",
+  ALLOWED_DOMAINS = "",  # Empty = use secure defaults
+  HTTPS_ONLY = "true",
   RATE_LIMIT_REQUESTS = "60",
-  MAX_FILE_SIZE_MB = "500"
+  MAX_FILE_SIZE_MB = "500",
+  REQUEST_TIMEOUT_MS = "30000"
 }
 
 [env.staging]
 vars = {
   ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173",
+  ALLOWED_DOMAINS = "",
+  HTTPS_ONLY = "false",  # Allow HTTP in staging
   RATE_LIMIT_REQUESTS = "120",
-  MAX_FILE_SIZE_MB = "500"
+  MAX_FILE_SIZE_MB = "500",
+  REQUEST_TIMEOUT_MS = "30000"
 }
 
 [env.development]
 vars = {
   ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173,http://localhost:3000",
+  ALLOWED_DOMAINS = "",
+  HTTPS_ONLY = "false",
   RATE_LIMIT_REQUESTS = "1000",
-  MAX_FILE_SIZE_MB = "500"
+  MAX_FILE_SIZE_MB = "500",
+  REQUEST_TIMEOUT_MS = "30000"
 }

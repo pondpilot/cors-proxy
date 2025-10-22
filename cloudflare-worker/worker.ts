@@ -5,24 +5,139 @@
  * without CORS headers. Designed for PondPilot to access public data sources.
  *
  * Privacy: No logging, no data retention, no tracking
- * Security: Origin validation, rate limiting, URL filtering
+ * Security: SSRF protection, domain allowlisting, HTTPS enforcement
  */
 
 interface Env {
-  RATE_LIMITER: RateLimiterNamespace;
+  RATE_LIMITER?: {
+    limit: (options: { key: string }) => Promise<{ success: boolean }>;
+  };
   ALLOWED_ORIGINS?: string;
   RATE_LIMIT_REQUESTS?: string;
   MAX_FILE_SIZE_MB?: string;
-  BLOCKED_DOMAINS?: string;
+  ALLOWED_DOMAINS?: string;
+  HTTPS_ONLY?: string;
+  REQUEST_TIMEOUT_MS?: string;
 }
+
+// Security: Private/internal IP patterns to block (SSRF protection)
+const PRIVATE_IP_PATTERNS = [
+  /^127\./,                    // 127.0.0.0/8 - Loopback
+  /^10\./,                     // 10.0.0.0/8 - Private
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12 - Private
+  /^192\.168\./,               // 192.168.0.0/16 - Private
+  /^169\.254\./,               // 169.254.0.0/16 - Link-local (AWS metadata!)
+  /^0\./,                      // 0.0.0.0/8
+  /^224\./,                    // Multicast
+  /^240\./,                    // Reserved
+  /^::1$/,                     // IPv6 loopback
+  /^fe80:/,                    // IPv6 link-local
+  /^fc00:/,                    // IPv6 private
+];
+
+const BLOCKED_HOSTNAMES = [
+  'localhost',
+  '0.0.0.0',
+  'metadata.google.internal',  // GCP metadata
+];
+
+// Default allowed domains (public data sources)
+const DEFAULT_ALLOWED_DOMAINS = [
+  /^.*\.s3\.amazonaws\.com$/,
+  /^.*\.s3\..*\.amazonaws\.com$/,
+  /^s3\.amazonaws\.com$/,
+  /^.*\.cloudfront\.net$/,
+  /^.*\.github\.io$/,
+  /^.*\.githubusercontent\.com$/,
+  /^storage\.googleapis\.com$/,
+  /^.*\.storage\.googleapis\.com$/,
+  /^.*\.blob\.core\.windows\.net$/,
+  /^.*\.cdn\..*$/,
+  /^data\..*$/,
+  /^datasets\..*$/,
+  /^download\..*$/,
+];
 
 const DEFAULT_CONFIG = {
   allowedOrigins: ['https://app.pondpilot.io', 'http://localhost:5173', 'http://localhost:3000'],
-  rateLimitRequests: 60, // per minute
+  rateLimitRequests: 60,
   maxFileSizeMB: 500,
-  allowedProtocols: ['https:', 'http:'],
-  blockedDomains: [] as string[],
+  requestTimeoutMs: 30000,
+  allowedProtocols: ['https:'],
+  httpsOnly: true,
+  allowedDomains: DEFAULT_ALLOWED_DOMAINS,
 };
+
+// Security validation functions
+function isPrivateIP(hostname: string): boolean {
+  if (BLOCKED_HOSTNAMES.includes(hostname.toLowerCase())) {
+    return true;
+  }
+  return PRIVATE_IP_PATTERNS.some(pattern => pattern.test(hostname));
+}
+
+function isAllowedDomain(hostname: string, allowedDomains: RegExp[]): boolean {
+  const lowerHostname = hostname.toLowerCase();
+  return allowedDomains.some(pattern => pattern.test(lowerHostname));
+}
+
+function parseAllowedDomains(domainsString: string | undefined): RegExp[] {
+  if (!domainsString || domainsString.trim() === '') {
+    return DEFAULT_ALLOWED_DOMAINS;
+  }
+
+  return domainsString
+    .split(',')
+    .map(d => d.trim())
+    .filter(d => d.length > 0)
+    .map(pattern => {
+      const escaped = pattern.replace(/\./g, '\\.').replace(/\*/g, '.*');
+      return new RegExp(`^${escaped}$`, 'i');
+    });
+}
+
+function validateTargetUrl(targetUrl: string, config: any): { valid: boolean; error?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(targetUrl);
+  } catch (e) {
+    return { valid: false, error: 'Invalid URL format' };
+  }
+
+  if (!config.allowedProtocols.includes(parsed.protocol)) {
+    return { valid: false, error: `Protocol ${parsed.protocol} not allowed` };
+  }
+
+  if (config.httpsOnly && parsed.protocol !== 'https:') {
+    return { valid: false, error: 'Only HTTPS URLs are allowed' };
+  }
+
+  if (isPrivateIP(parsed.hostname)) {
+    return { valid: false, error: 'Access to private/internal IP addresses is not allowed' };
+  }
+
+  if (!isAllowedDomain(parsed.hostname, config.allowedDomains)) {
+    return { valid: false, error: `Domain ${parsed.hostname} is not in the allowlist` };
+  }
+
+  return { valid: true };
+}
+
+function validateResponse(response: Response, maxFileSizeMB: number): { valid: boolean; error?: string } {
+  if (response.status >= 300 && response.status < 400) {
+    return { valid: false, error: 'Redirects are not supported for security reasons' };
+  }
+
+  const contentLength = response.headers.get('Content-Length');
+  if (contentLength) {
+    const sizeMB = parseInt(contentLength) / (1024 * 1024);
+    if (sizeMB > maxFileSizeMB) {
+      return { valid: false, error: `File too large (${sizeMB.toFixed(1)}MB > ${maxFileSizeMB}MB)` };
+    }
+  }
+
+  return { valid: true };
+}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -45,12 +160,19 @@ export default {
 
     // Info endpoint
     if (url.pathname === '/' || url.pathname === '/info') {
+      const config = getConfig(env);
       return jsonResponse({
-        service: 'PondPilot CORS Proxy',
-        version: '1.0.0',
+        service: 'PondPilot CORS Proxy (Cloudflare Workers)',
+        version: '2.0.0',
         usage: 'GET /proxy?url=<encoded-url>',
         privacy: 'No logging, no data retention',
-        source: 'https://github.com/yourusername/cors-proxy',
+        security: 'SSRF protection, domain allowlisting, HTTPS enforcement',
+        source: 'https://github.com/pondpilot/cors-proxy',
+        config: {
+          httpsOnly: config.httpsOnly,
+          allowedDomainsCount: config.allowedDomains.length,
+          usingDefaultAllowlist: !env.ALLOWED_DOMAINS,
+        },
       });
     }
 
@@ -90,45 +212,40 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
     return corsError('Missing url parameter', origin, 400);
   }
 
-  // Validate target URL
-  let parsedTarget: URL;
+  // Validate URL with SSRF protection
+  const validation = validateTargetUrl(targetUrl, config);
+  if (!validation.valid) {
+    return corsError(validation.error || 'Invalid URL', origin, 403);
+  }
+
+  // Fetch the resource with security settings
   try {
-    parsedTarget = new URL(targetUrl);
-  } catch (e) {
-    return corsError('Invalid URL', origin, 400);
-  }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.requestTimeoutMs);
 
-  // Check protocol
-  if (!config.allowedProtocols.includes(parsedTarget.protocol)) {
-    return corsError(`Protocol ${parsedTarget.protocol} not allowed`, origin, 400);
-  }
+    let targetResponse: Response;
+    try {
+      targetResponse = await fetch(targetUrl, {
+        method: request.method,
+        headers: {
+          'User-Agent': 'PondPilot-CORS-Proxy/2.0',
+        },
+        redirect: 'manual', // Critical: Prevent redirects to internal IPs
+        signal: controller.signal,
+        // Use Cloudflare's cache
+        cf: {
+          cacheEverything: true,
+          cacheTtl: 3600,
+        },
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
-  // Check blocked domains
-  if (config.blockedDomains.some(domain => parsedTarget.hostname.endsWith(domain))) {
-    return corsError('Domain is blocked', origin, 403);
-  }
-
-  // Fetch the resource
-  try {
-    const targetResponse = await fetch(targetUrl, {
-      method: request.method,
-      headers: {
-        'User-Agent': 'PondPilot-CORS-Proxy/1.0',
-      },
-      // Use Cloudflare's cache
-      cf: {
-        cacheEverything: true,
-        cacheTtl: 3600,
-      },
-    });
-
-    // Check file size
-    const contentLength = targetResponse.headers.get('Content-Length');
-    if (contentLength) {
-      const sizeMB = parseInt(contentLength) / (1024 * 1024);
-      if (sizeMB > config.maxFileSizeMB) {
-        return corsError(`File too large (${sizeMB.toFixed(1)}MB > ${config.maxFileSizeMB}MB)`, origin, 413);
-      }
+    // Validate response (check for redirects, file size)
+    const responseValidation = validateResponse(targetResponse, config.maxFileSizeMB);
+    if (!responseValidation.valid) {
+      return corsError(responseValidation.error || 'Invalid response', origin, 400);
     }
 
     // Create response with CORS headers
@@ -153,6 +270,11 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
     });
 
   } catch (error) {
+    // Handle timeout errors
+    if (error instanceof Error && error.name === 'AbortError') {
+      return corsError('Request timeout - the remote server took too long to respond', origin, 504);
+    }
+
     console.error('Fetch error:', error);
     return corsError(`Failed to fetch resource: ${error instanceof Error ? error.message : 'Unknown error'}`, origin, 502);
   }
@@ -187,10 +309,12 @@ function getConfig(env: Env) {
     maxFileSizeMB: env.MAX_FILE_SIZE_MB
       ? parseInt(env.MAX_FILE_SIZE_MB)
       : DEFAULT_CONFIG.maxFileSizeMB,
+    requestTimeoutMs: env.REQUEST_TIMEOUT_MS
+      ? parseInt(env.REQUEST_TIMEOUT_MS)
+      : DEFAULT_CONFIG.requestTimeoutMs,
     allowedProtocols: DEFAULT_CONFIG.allowedProtocols,
-    blockedDomains: env.BLOCKED_DOMAINS
-      ? env.BLOCKED_DOMAINS.split(',').map(d => d.trim())
-      : DEFAULT_CONFIG.blockedDomains,
+    httpsOnly: env.HTTPS_ONLY === 'false' ? false : DEFAULT_CONFIG.httpsOnly,
+    allowedDomains: parseAllowedDomains(env.ALLOWED_DOMAINS),
   };
 }
 
