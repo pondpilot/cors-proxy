@@ -1,0 +1,28 @@
+{
+  "name": "pondpilot-cors-proxy-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker CORS proxy for PondPilot",
+  "main": "worker.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:production": "wrangler deploy --env production",
+    "deploy:staging": "wrangler deploy --env staging",
+    "tail": "wrangler tail",
+    "test": "vitest"
+  },
+  "keywords": [
+    "cors",
+    "proxy",
+    "cloudflare-workers",
+    "pondpilot"
+  ],
+  "author": "PondPilot Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.95.0"
+  }
+}

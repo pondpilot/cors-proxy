@@ -1,0 +1,44 @@
+name = "pondpilot-cors-proxy"
+main = "worker.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Account details (update with your Cloudflare account)
+# account_id = "your-account-id"
+# workers_dev = true
+
+# Production route
+# routes = [
+#   { pattern = "cors-proxy.pondpilot.io/*", zone_name = "pondpilot.io" }
+# ]
+
+# Rate limiting (Cloudflare Workers Bindings)
+[[unsafe.bindings]]
+name = "RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "pondpilot_cors_proxy"
+
+# Simple rate limit: 60 requests per minute
+simple = { limit = 60, period = 60 }
+
+# Environment variables
+[env.production]
+vars = {
+  ALLOWED_ORIGINS = "https://app.pondpilot.io",
+  RATE_LIMIT_REQUESTS = "60",
+  MAX_FILE_SIZE_MB = "500"
+}
+
+[env.staging]
+vars = {
+  ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173",
+  RATE_LIMIT_REQUESTS = "120",
+  MAX_FILE_SIZE_MB = "500"
+}
+
+[env.development]
+vars = {
+  ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173,http://localhost:3000",
+  RATE_LIMIT_REQUESTS = "1000",
+  MAX_FILE_SIZE_MB = "500"
+}

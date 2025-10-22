@@ -1,0 +1,41 @@
+{
+  "name": "pondpilot-cors-proxy-selfhosted",
+  "version": "1.0.0",
+  "description": "Self-hosted Node.js CORS proxy for PondPilot",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "docker:build": "docker build -t pondpilot-cors-proxy .",
+    "docker:run": "docker run -p 3000:3000 --env-file .env pondpilot-cors-proxy",
+    "compose:up": "docker compose up -d",
+    "compose:down": "docker compose down",
+    "compose:logs": "docker compose logs -f"
+  },
+  "keywords": [
+    "cors",
+    "proxy",
+    "nodejs",
+    "pondpilot"
+  ],
+  "author": "PondPilot Team",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
