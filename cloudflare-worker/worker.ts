@@ -8,6 +8,8 @@
  * Security: SSRF protection, domain allowlisting, HTTPS enforcement
  */
 
+import { parseAllowedDomains, validatePatternComplexity, DEFAULT_ALLOWED_DOMAINS } from '../shared/security';
+
 interface Env {
   RATE_LIMITER?: {
     limit: (options: { key: string }) => Promise<{ success: boolean }>;
@@ -18,6 +20,7 @@ interface Env {
   ALLOWED_DOMAINS?: string;
   HTTPS_ONLY?: string;
   REQUEST_TIMEOUT_MS?: string;
+  ALLOW_CREDENTIALS?: string;
 }
 
 // Security: Private/internal IP patterns to block (SSRF protection)
@@ -33,29 +36,13 @@ const PRIVATE_IP_PATTERNS = [
   /^::1$/,                     // IPv6 loopback
   /^fe80:/,                    // IPv6 link-local
   /^fc00:/,                    // IPv6 private
+  /^fd00:/,                    // IPv6 private
 ];
 
 const BLOCKED_HOSTNAMES = [
   'localhost',
   '0.0.0.0',
   'metadata.google.internal',  // GCP metadata
-];
-
-// Default allowed domains (public data sources)
-const DEFAULT_ALLOWED_DOMAINS = [
-  /^.*\.s3\.amazonaws\.com$/,
-  /^.*\.s3\..*\.amazonaws\.com$/,
-  /^s3\.amazonaws\.com$/,
-  /^.*\.cloudfront\.net$/,
-  /^.*\.github\.io$/,
-  /^.*\.githubusercontent\.com$/,
-  /^storage\.googleapis\.com$/,
-  /^.*\.storage\.googleapis\.com$/,
-  /^.*\.blob\.core\.windows\.net$/,
-  /^.*\.cdn\..*$/,
-  /^data\..*$/,
-  /^datasets\..*$/,
-  /^download\..*$/,
 ];
 
 const DEFAULT_CONFIG = {
@@ -66,6 +53,7 @@ const DEFAULT_CONFIG = {
   allowedProtocols: ['https:'],
   httpsOnly: true,
   allowedDomains: DEFAULT_ALLOWED_DOMAINS,
+  allowCredentials: false,
 };
 
 // Security validation functions
@@ -79,21 +67,6 @@ function isPrivateIP(hostname: string): boolean {
 function isAllowedDomain(hostname: string, allowedDomains: RegExp[]): boolean {
   const lowerHostname = hostname.toLowerCase();
   return allowedDomains.some(pattern => pattern.test(lowerHostname));
-}
-
-function parseAllowedDomains(domainsString: string | undefined): RegExp[] {
-  if (!domainsString || domainsString.trim() === '') {
-    return DEFAULT_ALLOWED_DOMAINS;
-  }
-
-  return domainsString
-    .split(',')
-    .map(d => d.trim())
-    .filter(d => d.length > 0)
-    .map(pattern => {
-      const escaped = pattern.replace(/\./g, '\\.').replace(/\*/g, '.*');
-      return new RegExp(`^${escaped}$`, 'i');
-    });
 }
 
 function validateTargetUrl(targetUrl: string, config: any): { valid: boolean; error?: string } {
@@ -249,21 +222,84 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
     }
 
     // Create response with CORS headers
-    const responseHeaders = new Headers(targetResponse.headers);
+    const responseHeaders = new Headers();
+
+    // Copy safe headers from upstream (excluding hop-by-hop and security headers)
+    const hopByHopHeaders = [
+      'connection',
+      'keep-alive',
+      'proxy-authenticate',
+      'proxy-authorization',
+      'te',
+      'trailers',
+      'transfer-encoding',
+      'upgrade',
+    ];
+
+    // Headers that should not be forwarded from upstream to prevent security issues
+    const blockedHeaders = [
+      'set-cookie',
+      'set-cookie2',
+      'content-security-policy',
+      'content-security-policy-report-only',
+      'x-frame-options',
+      'cross-origin-resource-policy',
+      'permissions-policy',
+      'report-to',
+      'nel',
+      'referrer-policy',
+      'origin-agent-cluster',
+    ];
+
+    targetResponse.headers.forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      if (!hopByHopHeaders.includes(lowerKey) && !blockedHeaders.includes(lowerKey)) {
+        responseHeaders.set(key, value);
+      }
+    });
 
     // Add CORS headers
     responseHeaders.set('Access-Control-Allow-Origin', origin);
     responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Range');
-    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
+    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type, ETag, Last-Modified');
 
-    // Add cache headers
-    responseHeaders.set('Cache-Control', 'public, max-age=3600');
+    if (config.allowCredentials) {
+      responseHeaders.set('Access-Control-Allow-Credentials', 'true');
+    }
+
+    // Add Vary headers for proper caching with CORS
+    responseHeaders.append('Vary', 'Origin');
+
+    // Add cache headers only if upstream didn't provide them
+    if (!responseHeaders.has('Cache-Control')) {
+      responseHeaders.set('Cache-Control', 'public, max-age=3600');
+    }
 
     // Add proxy headers for transparency
     responseHeaders.set('X-Proxy-By', 'PondPilot-CORS-Proxy');
 
-    return new Response(targetResponse.body, {
+    // Stream response with size enforcement
+    const maxBytes = config.maxFileSizeMB * 1024 * 1024;
+    let bytesTransferred = 0;
+
+    const sizeEnforcingStream = new TransformStream({
+      transform(chunk, controller) {
+        bytesTransferred += chunk.byteLength;
+
+        if (bytesTransferred > maxBytes) {
+          controller.error(new Error(`File too large (exceeds ${config.maxFileSizeMB}MB limit)`));
+          return;
+        }
+
+        controller.enqueue(chunk);
+      },
+    });
+
+    // Pipe the response through the size-enforcing stream
+    const responseBody = targetResponse.body?.pipeThrough(sizeEnforcingStream);
+
+    return new Response(responseBody, {
       status: targetResponse.status,
       statusText: targetResponse.statusText,
       headers: responseHeaders,
@@ -288,14 +324,19 @@ function handlePreflight(request: Request, env: Env): Response {
     return new Response(null, { status: 403 });
   }
 
-  return new Response(null, {
-    headers: {
-      'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Range',
-      'Access-Control-Max-Age': '86400',
-    },
-  });
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Range',
+    'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers',
+  };
+
+  if (config.allowCredentials) {
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  }
+
+  return new Response(null, { headers });
 }
 
 function getConfig(env: Env) {
@@ -315,6 +356,7 @@ function getConfig(env: Env) {
     allowedProtocols: DEFAULT_CONFIG.allowedProtocols,
     httpsOnly: env.HTTPS_ONLY === 'false' ? false : DEFAULT_CONFIG.httpsOnly,
     allowedDomains: parseAllowedDomains(env.ALLOWED_DOMAINS),
+    allowCredentials: env.ALLOW_CREDENTIALS === 'true',
   };
 }
 

@@ -18,10 +18,13 @@ const PRIVATE_IP_PATTERNS = [
   /^224\./,                    // 224.0.0.0/4 - Multicast
   /^240\./,                    // 240.0.0.0/4 - Reserved
   /^255\.255\.255\.255$/,      // Broadcast
+  /^::$/,                      // IPv6 any address
   /^::1$/,                     // IPv6 loopback
   /^fe80:/,                    // IPv6 link-local
-  /^fc00:/,                    // IPv6 private
-  /^fd00:/,                    // IPv6 private
+  /^fc00:/,                    // IPv6 unique local (private)
+  /^fd00:/,                    // IPv6 unique local (private)
+  /^2001:db8:/,                // IPv6 documentation prefix
+  /^ff00:/,                    // IPv6 multicast
 ];
 
 // Reserved/dangerous hostnames
@@ -31,6 +34,8 @@ const BLOCKED_HOSTNAMES = [
   'metadata.google.internal',  // GCP metadata
   'kubernetes',
   'kubernetes.default',
+  'kubernetes.default.svc',
+  'kubernetes.default.svc.cluster.local',
 ];
 
 /**
@@ -45,7 +50,7 @@ export const DEFAULT_ALLOWED_DOMAINS = [
   /^s3\..*\.amazonaws\.com$/,
 
   // CloudFront CDN
-  /^.*\.cloudfront\.net$/,
+  /^d[0-9a-z]+\.cloudfront\.net$/,
 
   // GitHub
   /^.*\.github\.io$/,
@@ -59,14 +64,11 @@ export const DEFAULT_ALLOWED_DOMAINS = [
   // Azure Blob Storage (public containers)
   /^.*\.blob\.core\.windows\.net$/,
 
-  // Common CDNs
-  /^.*\.cdn\..*$/,
-  /^cdn\..*$/,
-
-  // Data repositories
-  /^data\..*$/,
-  /^datasets\..*$/,
-  /^download\..*$/,
+  // Public open-data portals
+  /^data\.gov$/,
+  /^.*\.data\.gov$/,
+  /^data\.gouv\.fr$/,
+  /^.*\.data\.gouv\.fr$/,
 ];
 
 export interface SecurityConfig {
@@ -156,28 +158,82 @@ export function validateTargetUrl(
 }
 
 /**
+ * Validate pattern for ReDoS protection
+ */
+export function validatePatternComplexity(pattern: string): { valid: boolean; reason?: string } {
+  // Check pattern length to prevent excessive memory use
+  const MAX_PATTERN_LENGTH = 100;
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    return { valid: false, reason: `pattern too long (max ${MAX_PATTERN_LENGTH} chars)` };
+  }
+
+  // Check wildcard count to prevent exponential backtracking
+  const MAX_WILDCARDS = 3;
+  const wildcardCount = (pattern.match(/\*/g) || []).length;
+  if (wildcardCount > MAX_WILDCARDS) {
+    return { valid: false, reason: `too many wildcards (max ${MAX_WILDCARDS})` };
+  }
+
+  // Check for suspicious patterns that could cause ReDoS
+  const dangerousPatterns = [
+    /(\*\.?){2,}/,  // Multiple consecutive wildcards
+    /\*\*+/,        // Multiple asterisks
+  ];
+
+  for (const dangerous of dangerousPatterns) {
+    if (dangerous.test(pattern)) {
+      return { valid: false, reason: 'suspicious pattern detected' };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
  * Parse domain patterns from environment variable string
  * Format: "s3.amazonaws.com,*.cloudfront.net,github.io"
+ *
+ * Implements ReDoS protection through:
+ * - Pattern length limits
+ * - Wildcard count limits
+ * - Proper escaping of special characters
  */
-export function parseAllowedDomains(domainsString: string): RegExp[] {
+export function parseAllowedDomains(domainsString: string | undefined): RegExp[] {
   if (!domainsString || domainsString.trim() === '') {
     return DEFAULT_ALLOWED_DOMAINS;
   }
 
-  return domainsString
+  const patterns = domainsString
     .split(',')
     .map(d => d.trim())
     .filter(d => d.length > 0)
     .map(pattern => {
-      // Convert wildcard pattern to regex
-      // *.example.com -> ^.*\.example\.com$
-      // example.com -> ^example\.com$
-      const escaped = pattern
-        .replace(/\./g, '\\.')  // Escape dots
-        .replace(/\*/g, '.*');   // Convert * to .*
+      // Validate pattern complexity for ReDoS protection
+      const validation = validatePatternComplexity(pattern);
+      if (!validation.valid) {
+        console.warn(`Ignoring invalid domain pattern "${pattern}":`, validation.reason);
+        return null;
+      }
 
-      return new RegExp(`^${escaped}$`, 'i');
-    });
+      // Convert wildcard pattern to regex with proper escaping
+      // *.example.com -> ^[^.]*\.example\.com$
+      // example.com -> ^example\.com$
+
+      // Escape all special regex characters except *
+      const escaped = pattern
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')  // Escape special chars
+        .replace(/\*/g, '[^.]*');  // Convert * to [^.]* (safe wildcard, no dots)
+
+      try {
+        return new RegExp(`^${escaped}$`, 'i');
+      } catch (error) {
+        console.warn('Ignoring invalid domain pattern:', pattern, error);
+        return null;
+      }
+    })
+    .filter((pattern): pattern is RegExp => pattern !== null);
+
+  return patterns.length > 0 ? patterns : DEFAULT_ALLOWED_DOMAINS;
 }
 
 /**

@@ -95,6 +95,75 @@ ALLOWED_DOMAINS = "*.s3.amazonaws.com,my-cdn.net"
 ALLOWED_DOMAINS=
 ```
 
+**Wildcard Pattern Semantics** (⚠️ Breaking Change in v2.0):
+
+Version 2.0 introduces **single-level wildcard matching** for improved security:
+
+- `*` matches ONE subdomain level only (not multiple levels)
+- Pattern matching uses `[^.]*` instead of `.*` to prevent subdomain traversal
+
+**Examples**:
+```bash
+# Pattern: example.com
+✅ Matches: example.com
+❌ Does NOT match: sub.example.com, api.example.com
+
+# Pattern: *.example.com
+✅ Matches: sub.example.com, api.example.com
+❌ Does NOT match: a.b.example.com, deep.sub.example.com
+
+# Pattern: *.*.example.com
+✅ Matches: a.b.example.com, api.v1.example.com
+❌ Does NOT match: x.y.z.example.com
+
+# Pattern: data.*.gov
+✅ Matches: data.usa.gov, data.uk.gov
+❌ Does NOT match: data.example.com
+```
+
+**Migration from v1.x**:
+If you previously used wildcards expecting multi-level matching, you may need to add more specific patterns:
+```bash
+# Before (v1.x): *.example.com matched all depths
+# After (v2.0): Need explicit patterns for each level
+ALLOWED_DOMAINS=*.example.com,*.*.example.com,*.*.*.example.com
+```
+
+**Security Rationale**:
+Single-level wildcards prevent accidental over-permissive patterns and ReDoS (Regular Expression Denial of Service) attacks.
+
+### Credential Forwarding
+
+**New in 2.0**: Optional credential forwarding for trusted sources.
+
+By default, the proxy does **NOT** forward credentials (cookies, auth headers). Enable this only for fully trusted origins and data sources:
+
+```bash
+# Self-hosted (.env)
+ALLOW_CREDENTIALS=true
+
+# Cloudflare Worker (wrangler.toml)
+ALLOW_CREDENTIALS = "true"
+```
+
+**⚠️ Security Warning**:
+- Only enable if **both** the client application (`ALLOWED_ORIGINS`) and data source (`ALLOWED_DOMAINS`) are fully trusted
+- If an allowed data source has a vulnerability (e.g., reflects user input), it could be exploited
+- Upstream `Set-Cookie` headers are blocked to prevent cookie hijacking
+- Enabling this increases risk and should only be used when absolutely necessary
+
+**Use Cases**:
+- Accessing authenticated APIs from browser-based applications
+- Corporate environments with trusted internal data sources
+- Development/testing scenarios with controlled domains
+
+**Best Practices**:
+1. Use credential forwarding sparingly
+2. Restrict `ALLOWED_ORIGINS` to specific, trusted origins (no wildcards)
+3. Restrict `ALLOWED_DOMAINS` to specific, trusted data sources
+4. Regularly audit which domains are allowed
+5. Consider using a separate proxy instance for authenticated requests
+
 ### Redirect Protection
 
 **Attack**: Redirect to internal IP after validation
@@ -161,15 +230,15 @@ Maximum file size enforced (default: 500MB):
 
 **Prevents**: Bandwidth exhaustion, memory issues
 
-### 5. Domain Blocking
+### 5. Domain Allowlist
 
-Optional blocklist for known malicious domains:
+Strict allowlist of trusted data hosts with optional extensions:
 
 ```bash
-BLOCKED_DOMAINS=spam.com,malicious.site
+ALLOWED_DOMAINS=*.example.com,datasets.gov
 ```
 
-**Prevents**: Proxy abuse for accessing blocked content
+**Prevents**: Proxy abuse by restricting outbound requests to approved domains
 
 ### 6. No Authentication Forwarding
 
