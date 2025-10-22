@@ -3,14 +3,13 @@ main = "worker.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Account details (update with your Cloudflare account)
-# account_id = "your-account-id"
-# workers_dev = true
+# Account details
+account_id = "15af93202d68497eb0c68d7a190fc5b9"
 
-# Production route
-# routes = [
-#   { pattern = "cors-proxy.pondpilot.io/*", zone_name = "pondpilot.io" }
-# ]
+# Production route - Custom domain
+routes = [
+  { pattern = "cors-proxy.pondpilot.io/*", zone_name = "pondpilot.io" }
+]
 
 # Rate limiting (Cloudflare Workers Bindings)
 [[unsafe.bindings]]
@@ -32,32 +31,29 @@ simple = { limit = 60, period = 60 }
 # - REQUEST_TIMEOUT_MS: Request timeout in milliseconds
 # - MAX_FILE_SIZE_MB: Maximum file size to proxy
 #
-[env.production]
-vars = {
-  ALLOWED_ORIGINS = "https://app.pondpilot.io",
-  ALLOWED_DOMAINS = "",  # Empty = use secure defaults
-  HTTPS_ONLY = "true",
-  RATE_LIMIT_REQUESTS = "60",
-  MAX_FILE_SIZE_MB = "500",
-  REQUEST_TIMEOUT_MS = "30000"
-}
+# Production environment - HTTPS enforced, secure defaults
+[env.production.vars]
+ALLOWED_ORIGINS = "https://app.pondpilot.io"
+ALLOWED_DOMAINS = ""
+HTTPS_ONLY = "true"
+RATE_LIMIT_REQUESTS = "60"
+MAX_FILE_SIZE_MB = "500"
+REQUEST_TIMEOUT_MS = "30000"
 
-[env.staging]
-vars = {
-  ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173",
-  ALLOWED_DOMAINS = "",
-  HTTPS_ONLY = "false",  # Allow HTTP in staging
-  RATE_LIMIT_REQUESTS = "120",
-  MAX_FILE_SIZE_MB = "500",
-  REQUEST_TIMEOUT_MS = "30000"
-}
+# Staging environment - HTTP allowed for testing
+[env.staging.vars]
+ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173"
+ALLOWED_DOMAINS = ""
+HTTPS_ONLY = "false"
+RATE_LIMIT_REQUESTS = "120"
+MAX_FILE_SIZE_MB = "500"
+REQUEST_TIMEOUT_MS = "30000"
 
-[env.development]
-vars = {
-  ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173,http://localhost:3000",
-  ALLOWED_DOMAINS = "",
-  HTTPS_ONLY = "false",
-  RATE_LIMIT_REQUESTS = "1000",
-  MAX_FILE_SIZE_MB = "500",
-  REQUEST_TIMEOUT_MS = "30000"
-}
+# Development environment
+[env.development.vars]
+ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173,http://localhost:3000"
+ALLOWED_DOMAINS = ""
+HTTPS_ONLY = "false"
+RATE_LIMIT_REQUESTS = "1000"
+MAX_FILE_SIZE_MB = "500"
+REQUEST_TIMEOUT_MS = "30000"
