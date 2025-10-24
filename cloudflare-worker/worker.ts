@@ -141,8 +141,8 @@ export default {
       const config = getConfig(env);
       return jsonResponse({
         service: 'PondPilot CORS Proxy (Cloudflare Workers)',
-        version: '2.1.0',
-        usage: 'GET /proxy?url=<encoded-url>',
+        version: '2.1.1',
+        usage: 'GET /proxy?url=<encoded-url> or GET /proxy-path/<protocol>/<host>/<path>',
         privacy: 'No logging, no data retention',
         security: 'SSRF protection, domain allowlisting, HTTPS enforcement',
         source: 'https://github.com/pondpilot/cors-proxy',
@@ -154,12 +154,18 @@ export default {
       });
     }
 
+    // Path-based proxy endpoint for DuckDB compatibility
+    // Supports URLs like: /proxy-path/https/bucket.s3.amazonaws.com/file.duckdb
+    if (url.pathname.startsWith('/proxy-path/')) {
+      return handleProxyPath(request, env, ctx);
+    }
+
     // Proxy endpoint
     if (url.pathname === '/proxy') {
       return handleProxy(request, env, ctx);
     }
 
-    return jsonError('Not found. Use /proxy?url=<encoded-url> or /bug-report', 404);
+    return jsonError('Not found. Use /proxy?url=<encoded-url> or /proxy-path/<protocol>/<host>/<path>', 404);
   },
 };
 
@@ -189,6 +195,198 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
   if (!targetUrl) {
     return corsError('Missing url parameter', origin, 400);
   }
+
+  // Validate URL with SSRF protection
+  const validation = validateTargetUrl(targetUrl, config);
+  if (!validation.valid) {
+    return corsError(validation.error || 'Invalid URL', origin, 403);
+  }
+
+  // Fetch the resource with security settings
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+
+    let targetResponse: Response;
+    try {
+      // Prepare headers for upstream request
+      const upstreamHeaders: Record<string, string> = {
+        'User-Agent': 'PondPilot-CORS-Proxy/2.1',
+      };
+
+      // Forward Range header if present (required for DuckDB random-access reads)
+      const rangeHeader = request.headers.get('Range');
+      if (rangeHeader) {
+        upstreamHeaders['Range'] = rangeHeader;
+      }
+
+      targetResponse = await fetch(targetUrl, {
+        method: request.method,
+        headers: upstreamHeaders,
+        redirect: 'manual', // Critical: Prevent redirects to internal IPs
+        signal: controller.signal,
+        // Use Cloudflare's cache
+        cf: {
+          cacheEverything: true,
+          cacheTtl: 3600,
+        },
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    // Validate response (check for redirects, file size)
+    const responseValidation = validateResponse(targetResponse, config.maxFileSizeMB);
+    if (!responseValidation.valid) {
+      return corsError(responseValidation.error || 'Invalid response', origin, 400);
+    }
+
+    // Create response with CORS headers
+    const responseHeaders = new Headers();
+
+    // Copy safe headers from upstream (excluding hop-by-hop and security headers)
+    const hopByHopHeaders = [
+      'connection',
+      'keep-alive',
+      'proxy-authenticate',
+      'proxy-authorization',
+      'te',
+      'trailers',
+      'transfer-encoding',
+      'upgrade',
+    ];
+
+    // Headers that should not be forwarded from upstream to prevent security issues
+    const blockedHeaders = [
+      'set-cookie',
+      'set-cookie2',
+      'content-security-policy',
+      'content-security-policy-report-only',
+      'x-frame-options',
+      'cross-origin-resource-policy',
+      'permissions-policy',
+      'report-to',
+      'nel',
+      'referrer-policy',
+      'origin-agent-cluster',
+    ];
+
+    targetResponse.headers.forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      if (!hopByHopHeaders.includes(lowerKey) && !blockedHeaders.includes(lowerKey)) {
+        responseHeaders.set(key, value);
+      }
+    });
+
+    // Add CORS headers
+    responseHeaders.set('Access-Control-Allow-Origin', origin);
+    responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Range');
+    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type, Accept-Ranges, ETag, Last-Modified');
+
+    if (config.allowCredentials) {
+      responseHeaders.set('Access-Control-Allow-Credentials', 'true');
+    }
+
+    // Add Vary headers for proper caching with CORS
+    responseHeaders.append('Vary', 'Origin');
+
+    // Add cache headers only if upstream didn't provide them
+    if (!responseHeaders.has('Cache-Control')) {
+      responseHeaders.set('Cache-Control', 'public, max-age=3600');
+    }
+
+    // Add proxy headers for transparency
+    responseHeaders.set('X-Proxy-By', 'PondPilot-CORS-Proxy');
+
+    // Stream response with size enforcement
+    const maxBytes = config.maxFileSizeMB * 1024 * 1024;
+    let bytesTransferred = 0;
+
+    const sizeEnforcingStream = new TransformStream({
+      transform(chunk, controller) {
+        bytesTransferred += chunk.byteLength;
+
+        if (bytesTransferred > maxBytes) {
+          controller.error(new Error(`File too large (exceeds ${config.maxFileSizeMB}MB limit)`));
+          return;
+        }
+
+        controller.enqueue(chunk);
+      },
+    });
+
+    // Pipe the response through the size-enforcing stream
+    const responseBody = targetResponse.body?.pipeThrough(sizeEnforcingStream);
+
+    return new Response(responseBody, {
+      status: targetResponse.status,
+      statusText: targetResponse.statusText,
+      headers: responseHeaders,
+    });
+
+  } catch (error) {
+    // Handle timeout errors
+    if (error instanceof Error && error.name === 'AbortError') {
+      return corsError('Request timeout - the remote server took too long to respond', origin, 504);
+    }
+
+    console.error('Fetch error:', error);
+    return corsError(`Failed to fetch resource: ${error instanceof Error ? error.message : 'Unknown error'}`, origin, 502);
+  }
+}
+
+async function handleProxyPath(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const config = getConfig(env);
+  const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const origin = request.headers.get('Origin');
+
+  // Validate origin
+  if (!origin || !config.allowedOrigins.includes(origin)) {
+    return corsError('Origin not allowed', origin, 403);
+  }
+
+  // Rate limiting
+  if (env.RATE_LIMITER) {
+    const rateLimitKey = `ip:${clientIP}`;
+    const { success } = await env.RATE_LIMITER.limit({ key: rateLimitKey });
+    if (!success) {
+      return corsError('Rate limit exceeded', origin, 429);
+    }
+  }
+
+  // Parse URL path: /proxy-path/:protocol/:host/*
+  const url = new URL(request.url);
+  const pathParts = url.pathname.split('/').filter(p => p);
+
+  // pathParts = ['proxy-path', 'https', 'bucket.s3.amazonaws.com', 'file.duckdb']
+  if (pathParts.length < 3 || pathParts[0] !== 'proxy-path') {
+    return corsError('Invalid path format. Use /proxy-path/<protocol>/<host>/<path>', origin, 400);
+  }
+
+  const protocol = pathParts[1];
+  const host = pathParts[2];
+  const path = pathParts.slice(3).join('/');
+
+  // Security: Validate protocol to prevent protocol injection attacks
+  const allowedProtocols = ['http', 'https'];
+  if (!allowedProtocols.includes(protocol.toLowerCase())) {
+    return corsError('Invalid protocol. Only http and https are allowed.', origin, 400);
+  }
+
+  // Security: Validate host against internal/private networks (SSRF protection)
+  if (isPrivateIP(host)) {
+    return corsError('Access to internal/private addresses is not allowed.', origin, 403);
+  }
+
+  // Security: Sanitize path to prevent path traversal attacks
+  const sanitizedPath = path
+    .replace(/\.\./g, '')      // Remove path traversal sequences
+    .replace(/\/+/g, '/')      // Normalize multiple slashes
+    .replace(/^\//, '');       // Remove leading slash
+
+  // Reconstruct the target URL with sanitized components
+  const targetUrl = `${protocol}://${host}/${sanitizedPath}`;
 
   // Validate URL with SSRF protection
   const validation = validateTargetUrl(targetUrl, config);
@@ -410,6 +608,7 @@ function handlePreflight(request: Request, env: Env): Response {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': allowedMethods,
     'Access-Control-Allow-Headers': 'Content-Type, Range',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type, Accept-Ranges, ETag, Last-Modified',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers',
   };
