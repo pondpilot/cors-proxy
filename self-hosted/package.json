@@ -1,6 +1,6 @@
 {
   "name": "pondpilot-cors-proxy-selfhosted",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Self-hosted Node.js CORS proxy for PondPilot",
   "main": "dist/server.js",
   "scripts": {

@@ -5,6 +5,37 @@ All notable changes to the PondPilot CORS Proxy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2025-10-24
+
+### Added
+- Path-based proxy endpoint `/proxy-path/:protocol/:host/*` for DuckDB compatibility
+  - Allows DuckDB to append file extensions (.wal, etc.) correctly
+  - Supports URLs like: `/proxy-path/https/bucket.s3.amazonaws.com/file.duckdb`
+- OPTIONS handler for CORS preflight requests
+  - Properly handles browser preflight checks
+  - Sets appropriate CORS headers with 24-hour max-age
+- DuckDB official data sources to security allowlist
+  - Added `blobs.duckdb.org` and `*.duckdb.org` domains
+
+### Security
+- Protocol validation to prevent protocol injection attacks
+  - Only allows http and https protocols
+  - Blocks file://, ftp://, and other potentially dangerous protocols
+- Enhanced SSRF protection with host validation
+  - Blocks localhost and loopback addresses
+  - Blocks private networks (10.x.x.x, 192.168.x.x, 172.16-31.x.x)
+  - Blocks link-local addresses (169.254.x.x)
+  - Blocks IPv6 private ranges (::1, fe80::, fc00::)
+  - Blocks cloud metadata endpoints (AWS, GCP)
+- Path sanitization to prevent path traversal attacks
+  - Removes `../` sequences
+  - Normalizes multiple slashes
+
+### Changed
+- Forward Content-Length header for better client compatibility
+- Set CORS headers early in request processing
+- Updated 404 error message to reflect new endpoint format
+
 ## [2.1.0] - 2025-10-24
 
 ### Added

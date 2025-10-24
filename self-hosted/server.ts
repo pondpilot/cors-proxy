@@ -89,7 +89,7 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.use('/proxy', limiter);
+app.use('/proxy-path', limiter);
 
 // Request logging (only in development)
 if (process.env.NODE_ENV !== 'production') {
@@ -116,7 +116,7 @@ app.get('/health', (req: Request, res: Response) => {
 app.get(['/', '/info'], (req: Request, res: Response) => {
   res.json({
     service: 'PondPilot CORS Proxy (Self-Hosted)',
-    version: '2.1.0',
+    version: '2.1.1',
     usage: 'GET /proxy?url=<encoded-url>',
     privacy: 'No logging, no data retention',
     security: 'SSRF protection, domain allowlisting, HTTPS enforcement',
@@ -132,13 +132,75 @@ app.get(['/', '/info'], (req: Request, res: Response) => {
   });
 });
 
-// Proxy endpoint
-app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const targetUrl = req.query.url as string;
+// OPTIONS handler for CORS preflight requests
+app.options('/proxy-path/:protocol/:host/*', (req: Request, res: Response) => {
+  const origin = req.headers.origin;
+  if (origin && config.allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type, Accept-Ranges, ETag, Last-Modified');
+    res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+    res.setHeader('Vary', 'Origin');
+  }
+  res.sendStatus(204);
+});
 
-    if (!targetUrl) {
-      return res.status(400).json({ error: 'Missing url parameter' });
+// Path-based proxy endpoint for DuckDB compatibility
+// Supports URLs like: /proxy-path/https/bucket.s3.amazonaws.com/file.duckdb
+// This allows DuckDB to append .wal and other extensions correctly
+app.get('/proxy-path/:protocol/:host/*', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { protocol, host } = req.params;
+    const path = req.params[0] || '';
+
+    // Security: Validate protocol to prevent protocol injection attacks
+    const allowedProtocols = ['http', 'https'];
+    if (!allowedProtocols.includes(protocol.toLowerCase())) {
+      return res.status(400).json({
+        error: 'Invalid protocol. Only http and https are allowed.'
+      });
+    }
+
+    // Security: Validate host against internal/private networks (SSRF protection)
+    // Block localhost, private networks, and other internal addresses
+    const internalHostPatterns = [
+      /^localhost$/i,
+      /^127\./,                          // Loopback
+      /^10\./,                           // Private network
+      /^172\.(1[6-9]|2[0-9]|3[01])\./,  // Private network
+      /^192\.168\./,                     // Private network
+      /^169\.254\./,                     // Link-local
+      /^::1$/,                           // IPv6 loopback
+      /^fe80:/i,                         // IPv6 link-local
+      /^fc00:/i,                         // IPv6 unique local
+      /^metadata\.google\.internal$/i,  // Cloud metadata
+      /^169\.254\.169\.254$/,           // AWS metadata
+    ];
+
+    if (internalHostPatterns.some(pattern => pattern.test(host))) {
+      return res.status(403).json({
+        error: 'Access to internal/private addresses is not allowed.'
+      });
+    }
+
+    // Security: Sanitize path to prevent path traversal attacks
+    const sanitizedPath = path
+      .replace(/\.\./g, '')      // Remove path traversal sequences
+      .replace(/\/+/g, '/')      // Normalize multiple slashes
+      .replace(/^\//, '');       // Remove leading slash (already in URL template)
+
+    // Reconstruct the target URL with sanitized components
+    const targetUrl = `${protocol}://${host}/${sanitizedPath}`;
+
+    // Set CORS headers FIRST before any other processing
+    const origin = req.headers.origin;
+    if (origin && config.allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type, Accept-Ranges, ETag, Last-Modified');
+      res.setHeader('Vary', 'Origin');
     }
 
     // Validate URL with SSRF protection
@@ -190,10 +252,11 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
     let transferred = 0;
     let startedStreaming = false;
 
-    // Copy headers (excluding content-length to avoid mismatch on abort)
+    // Copy headers from upstream
     const headersToForward = [
       'content-type',
       'content-range',
+      'content-length',
       'accept-ranges',
       'etag',
       'last-modified',
@@ -271,7 +334,7 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
 // 404 handler
 app.use((req: Request, res: Response) => {
   res.status(404).json({
-    error: 'Not found. Use /proxy?url=<encoded-url>',
+    error: 'Not found. Use /proxy-path/<protocol>/<host>/<path>',
   });
 });
 

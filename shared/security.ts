@@ -69,6 +69,10 @@ export const DEFAULT_ALLOWED_DOMAINS = [
   /^.*\.data\.gov$/,
   /^data\.gouv\.fr$/,
   /^.*\.data\.gouv\.fr$/,
+
+  // DuckDB official data sources
+  /^blobs\.duckdb\.org$/,
+  /^.*\.duckdb\.org$/,
 ];
 
 export interface SecurityConfig {
