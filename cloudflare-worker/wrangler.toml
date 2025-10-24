@@ -33,7 +33,7 @@ simple = { limit = 60, period = 60 }
 #
 # Production environment - HTTPS enforced, secure defaults
 [env.production.vars]
-ALLOWED_ORIGINS = "https://app.pondpilot.io"
+ALLOWED_ORIGINS = "https://app.pondpilot.io,http://localhost:5173"
 ALLOWED_DOMAINS = ""
 HTTPS_ONLY = "true"
 RATE_LIMIT_REQUESTS = "60"

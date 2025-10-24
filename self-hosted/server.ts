@@ -73,7 +73,7 @@ const corsOptions: cors.CorsOptions = {
   },
   methods: ['GET', 'HEAD', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Range'],
-  exposedHeaders: ['Content-Length', 'Content-Range', 'Content-Type'],
+  exposedHeaders: ['Content-Length', 'Content-Range', 'Content-Type', 'Accept-Ranges', 'ETag', 'Last-Modified'],
   credentials: config.allowCredentials,
   maxAge: 86400,
 };
@@ -159,11 +159,20 @@ app.get('/proxy', async (req: Request, res: Response, next: NextFunction) => {
 
     let fetchResponse: globalThis.Response;
     try {
+      // Prepare headers for upstream request
+      const upstreamHeaders: Record<string, string> = {
+        'User-Agent': 'PondPilot-CORS-Proxy/2.0',
+      };
+
+      // Forward Range header if present (required for DuckDB random-access reads)
+      const rangeHeader = req.headers.range;
+      if (rangeHeader) {
+        upstreamHeaders['Range'] = rangeHeader;
+      }
+
       fetchResponse = await fetch(targetUrl, {
         method: req.method,
-        headers: {
-          'User-Agent': 'PondPilot-CORS-Proxy/2.0',
-        },
+        headers: upstreamHeaders,
         redirect: 'manual', // Critical: Prevent redirects to internal IPs
         signal: controller.signal,
       });

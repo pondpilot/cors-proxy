@@ -114,17 +114,22 @@ function validateResponse(response: Response, maxFileSizeMB: number): { valid: b
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return handlePreflight(request, env);
     }
 
-    // Only allow GET and HEAD
+    // Bug report endpoint (for PondPilot bug reporting to Slack) - allows POST
+    if (url.pathname === '/bug-report') {
+      return handleBugReport(request, env);
+    }
+
+    // Only allow GET and HEAD for other endpoints
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return jsonError('Method not allowed', 405);
     }
-
-    const url = new URL(request.url);
 
     // Health check endpoint
     if (url.pathname === '/health') {
@@ -154,7 +159,7 @@ export default {
       return handleProxy(request, env, ctx);
     }
 
-    return jsonError('Not found. Use /proxy?url=<encoded-url>', 404);
+    return jsonError('Not found. Use /proxy?url=<encoded-url> or /bug-report', 404);
   },
 };
 
@@ -198,11 +203,20 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
 
     let targetResponse: Response;
     try {
+      // Prepare headers for upstream request
+      const upstreamHeaders: Record<string, string> = {
+        'User-Agent': 'PondPilot-CORS-Proxy/2.0',
+      };
+
+      // Forward Range header if present (required for DuckDB random-access reads)
+      const rangeHeader = request.headers.get('Range');
+      if (rangeHeader) {
+        upstreamHeaders['Range'] = rangeHeader;
+      }
+
       targetResponse = await fetch(targetUrl, {
         method: request.method,
-        headers: {
-          'User-Agent': 'PondPilot-CORS-Proxy/2.0',
-        },
+        headers: upstreamHeaders,
         redirect: 'manual', // Critical: Prevent redirects to internal IPs
         signal: controller.signal,
         // Use Cloudflare's cache
@@ -262,7 +276,7 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
     responseHeaders.set('Access-Control-Allow-Origin', origin);
     responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Range');
-    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type, ETag, Last-Modified');
+    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type, Accept-Ranges, ETag, Last-Modified');
 
     if (config.allowCredentials) {
       responseHeaders.set('Access-Control-Allow-Credentials', 'true');
@@ -316,6 +330,67 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
   }
 }
 
+async function handleBugReport(request: Request, env: Env): Promise<Response> {
+  const config = getConfig(env);
+  const origin = request.headers.get('Origin');
+
+  // Only allow POST
+  if (request.method !== 'POST') {
+    return corsError('Method not allowed', origin, 405);
+  }
+
+  // Validate origin
+  if (!origin || !config.allowedOrigins.includes(origin)) {
+    return corsError('Origin not allowed', origin, 403);
+  }
+
+  try {
+    const body = await request.json();
+    const { slackPayload, webhookUrl } = body;
+
+    if (!slackPayload || !webhookUrl) {
+      return corsError('Missing slackPayload or webhookUrl', origin, 400);
+    }
+
+    // Validate webhook URL is actually a Slack webhook
+    if (!webhookUrl.startsWith('https://hooks.slack.com/')) {
+      return corsError('Invalid Slack webhook URL', origin, 400);
+    }
+
+    // Forward to Slack
+    const slackResponse = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(slackPayload),
+    });
+
+    const responseText = await slackResponse.text();
+
+    return new Response(
+      JSON.stringify({
+        success: slackResponse.ok,
+        status: slackResponse.status,
+        message: responseText,
+      }),
+      {
+        status: slackResponse.ok ? 200 : 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': origin,
+        },
+      }
+    );
+  } catch (error) {
+    return corsError(
+      error instanceof Error ? error.message : 'Unknown error',
+      origin,
+      500
+    );
+  }
+}
+
 function handlePreflight(request: Request, env: Env): Response {
   const config = getConfig(env);
   const origin = request.headers.get('Origin');
@@ -324,9 +399,16 @@ function handlePreflight(request: Request, env: Env): Response {
     return new Response(null, { status: 403 });
   }
 
+  const url = new URL(request.url);
+
+  // Determine allowed methods based on endpoint
+  const allowedMethods = url.pathname === '/bug-report'
+    ? 'GET, HEAD, POST, OPTIONS'
+    : 'GET, HEAD, OPTIONS';
+
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Methods': allowedMethods,
     'Access-Control-Allow-Headers': 'Content-Type, Range',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers',
