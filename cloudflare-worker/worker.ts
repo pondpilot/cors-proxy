@@ -141,7 +141,7 @@ export default {
       const config = getConfig(env);
       return jsonResponse({
         service: 'PondPilot CORS Proxy (Cloudflare Workers)',
-        version: '2.0.0',
+        version: '2.1.0',
         usage: 'GET /proxy?url=<encoded-url>',
         privacy: 'No logging, no data retention',
         security: 'SSRF protection, domain allowlisting, HTTPS enforcement',
@@ -205,7 +205,7 @@ async function handleProxy(request: Request, env: Env, ctx: ExecutionContext): P
     try {
       // Prepare headers for upstream request
       const upstreamHeaders: Record<string, string> = {
-        'User-Agent': 'PondPilot-CORS-Proxy/2.0',
+        'User-Agent': 'PondPilot-CORS-Proxy/2.1',
       };
 
       // Forward Range header if present (required for DuckDB random-access reads)
