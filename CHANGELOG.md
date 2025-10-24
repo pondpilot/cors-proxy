@@ -5,6 +5,27 @@ All notable changes to the PondPilot CORS Proxy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-10-24
+
+### Added
+- `/bug-report` endpoint for PondPilot Slack integration
+  - Forwards bug reports from PondPilot app to Slack webhooks
+  - Validates webhook URLs to only allow `hooks.slack.com` domain
+  - Supports POST requests with Slack-formatted payloads
+
+### Fixed
+- HTTP Range header forwarding for DuckDB remote database access
+  - Forward `Range` header from client to upstream server
+  - Add `Accept-Ranges` to CORS exposed headers for browser visibility
+  - Enables DuckDB-WASM to perform random-access reads on remote .duckdb files
+- Verified `Content-Range` header exposure in production deployment
+  - Works in conjunction with PondPilot v0.7.0 client-side fixes for S3 URL handling
+
+### Changed
+- Added `localhost:5173` to production `ALLOWED_ORIGINS` for local testing
+- Redeployed to production with confirmed CORS header configuration
+- Updated deployment verification process
+
 ## [2.0.0] - 2025-10-22
 
 ### Added - Security Enhancements
